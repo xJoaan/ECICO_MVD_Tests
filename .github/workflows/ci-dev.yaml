@@ -1,0 +1,73 @@
+name: CI Dev
+
+on:
+  push:
+    branches:
+      - dev
+      - 'feature/**'
+  pull_request:
+    branches:
+      - dev
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: gradle
+
+      - name: Run tests
+        run: |
+          echo "Haciendo tests"
+          ./gradlew test
+
+  build-and-push:
+    # 🔑 solo cuando el push es a dev (no feature, no PR)
+    if: github.ref == 'refs/heads/dev'
+    needs: test
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: gradle
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-dev
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker images
+        run: ./gradlew -Ppersistence=true dockerize
+
+      - name: Tag & Push all images to ECR
+        env:
+          ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGES=(catalog-server controlplane dataplane identity-hub issuerservice)
+          
+          for IMAGE in "${IMAGES[@]}"; do
+            echo "Pushing ${IMAGE}..."
+            docker tag ${IMAGE}:latest ${ECR_REGISTRY}/${IMAGE}:${IMAGE_TAG}
+            docker tag ${IMAGE}:latest ${ECR_REGISTRY}/${IMAGE}:dev
+            docker push ${ECR_REGISTRY}/${IMAGE}:${IMAGE_TAG}
+            docker push ${ECR_REGISTRY}/${IMAGE}:dev
+          done
