@@ -24,7 +24,7 @@ dependencies {
     runtimeOnly(project(":extensions:catalog-node-resolver")) // to trigger the federated catalog
     runtimeOnly(libs.edc.bom.controlplane)
     runtimeOnly(libs.edc.api.secrets)
-
+    runtimeOnly(libs.edc.aws.validator.data.address.s3)
     if (project.properties.getOrDefault("persistence", "false") == "true") {
         runtimeOnly(libs.edc.vault.hashicorp)
         runtimeOnly(libs.edc.bom.controlplane.sql)
