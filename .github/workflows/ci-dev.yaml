@@ -1,6 +1,12 @@
 name: CI Dev
 
 on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch a desplegar'
+        required: true
+        default: 'dev'
   push:
     branches:
       - dev
@@ -74,3 +80,82 @@ jobs:
             docker push ${ECR_REGISTRY}/${IMAGE}:${IMAGE_TAG}
             docker push ${ECR_REGISTRY}/${IMAGE}:dev
           done
+      - name: Configure kubectl for EKS
+        run: |
+            aws eks update-kubeconfig \
+              --region ${{ vars.AWS_REGION }} \
+              --name ${{ vars.EKS_CLUSTER_NAME }}
+
+      - name: Deploy to all participants
+        env:
+            ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
+            IMAGE_TAG: ${{ github.sha }}
+        run: |
+            set -e
+
+            # Imágenes que queremos actualizar (nombres en ECR)
+            # 🆕 Añadido issuerservice
+            MANAGED_IMAGES=("controlplane" "dataplane" "identity-hub" "catalog-server" "issuerservice")
+
+            # Detectar namespaces que tienen nuestros deployments
+            NAMESPACES=$(kubectl get deployments --all-namespaces -o json | \
+              jq -r --arg registry "$ECR_REGISTRY" \
+              '.items[] | select(.spec.template.spec.containers[].image | startswith($registry)) | .metadata.namespace' | \
+              sort -u)
+
+            if [[ -z "$NAMESPACES" ]]; then
+              echo "⚠️ No se encontraron namespaces con imágenes de ECR"
+              exit 0
+            fi
+
+            echo "📦 Namespaces detectados:"
+            echo "$NAMESPACES" | sed 's/^/  - /'
+            echo ""
+
+            for NS in $NAMESPACES; do
+              echo "🔄 Namespace: $NS"
+
+              kubectl get deployments -n "$NS" -o json | jq -c '.items[]' | while read -r DEPLOY_JSON; do
+                DEPLOY_NAME=$(echo "$DEPLOY_JSON" | jq -r '.metadata.name')
+                CONTAINER_COUNT=$(echo "$DEPLOY_JSON" | jq '.spec.template.spec.containers | length')
+
+                for ((i=0; i<CONTAINER_COUNT; i++)); do
+                  CURRENT_IMAGE=$(echo "$DEPLOY_JSON" | jq -r ".spec.template.spec.containers[$i].image")
+                  CONTAINER_NAME=$(echo "$DEPLOY_JSON" | jq -r ".spec.template.spec.containers[$i].name")
+                  IMAGE_NAME=$(echo "$CURRENT_IMAGE" | sed 's|.*/||' | sed 's|:.*||')
+
+                  for MANAGED in "${MANAGED_IMAGES[@]}"; do
+                    if [[ "$IMAGE_NAME" == "$MANAGED" ]]; then
+                      NEW_IMAGE="${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+                      echo "  ✓ $DEPLOY_NAME/$CONTAINER_NAME: $IMAGE_NAME → ${IMAGE_TAG:0:12}"
+                      kubectl set image "deployment/$DEPLOY_NAME" "$CONTAINER_NAME=$NEW_IMAGE" -n "$NS"
+                      break
+                    fi
+                  done
+                done
+              done
+            done
+
+            echo ""
+            echo "⏳ Esperando rollouts..."
+
+            FAILED=0
+            for NS in $NAMESPACES; do
+              echo "  Namespace: $NS"
+              if ! kubectl rollout status deployment --timeout=300s -n "$NS"; then
+                echo "  ❌ Rollout falló en $NS"
+                FAILED=1
+              fi
+            done
+
+            if [[ $FAILED -eq 1 ]]; then
+              echo ""
+              echo "❌ Algunos rollouts fallaron. Pods con problemas:"
+              for NS in $NAMESPACES; do
+                kubectl get pods -n "$NS" --field-selector=status.phase!=Running,status.phase!=Succeeded 2>/dev/null || true
+              done
+              exit 1
+            fi
+
+            echo ""
+            echo "✅ Deploy completado exitosamente"
