@@ -1,6 +1,12 @@
 name: CI Dev
 
 on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch a desplegar'
+        required: true
+        default: 'dev'
   push:
     branches:
       - dev
