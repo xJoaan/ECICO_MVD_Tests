@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +41,7 @@ jobs:
     # 🔑 solo cuando el push es a dev (no feature, no PR)
     if: github.ref == 'refs/heads/dev'
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     environment: dev
 
     steps:
